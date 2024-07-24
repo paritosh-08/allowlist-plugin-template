@@ -1,0 +1,1 @@
+# allowlist-plugin-template
