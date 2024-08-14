@@ -9,6 +9,11 @@
  */
 
 import { parse } from "graphql";
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+import { instrument, ResolveConfigFn } from '@microlabs/otel-cf-workers';
+
+// OTLP setup
+const tracer = trace.getTracer('allow-list-plugin')
 
 // The configuration for the allowlist
 let config = {
@@ -30,32 +35,46 @@ for (let i = 0; i < allowlist.length; i++) {
   );
 }
 
-export default {
+const handler = {
   async fetch(request, env, ctx) {
-    let rawRequest = await request.json();
-    // Check if the header is present and matches the configuration
-    if (
-      request.headers === null ||
-      request.headers.get("hasura-m-auth") !== config.headers["hasura-m-auth"]
-    ) {
-      console.log("Header not found, sending 400");
-      let response = new Blob([
-        JSON.stringify({ message: "unauthorized request" }),
-      ]);
-      return new Response(response, { status: 400 });
-    }
-    // Parse the query
-    const query = rawRequest["rawRequest"]["query"];
-    const parsedQuery = parse(query, { noLocation: true }).definitions;
-    const stringifiedParsedQuery = JSON.stringify(parsedQuery);
-    // Check if the query is in the allowlist
-    if (hashSetAllowlist.has(stringifiedParsedQuery)) {
-      return new Response(null, { status: 204 });
-    } else {
-      let response = new Blob([
-        JSON.stringify({ message: "Query not allowed" }),
-      ]);
-      return new Response(response, { status: 400 });
-    }
+    return tracer.startActiveSpan('Handle request', async (span) => {
+      let rawRequest = await request.json();
+      // Check if the header is present and matches the configuration
+      if (request.headers === null || (request.headers.get("hasura-m-auth") !== config.headers['hasura-m-auth'])) {
+          console.log('Header not found, sending 400');
+          let response = new Blob([JSON.stringify({"message": "unauthorized request"})]);
+        return new Response(response, { status: 400 });
+      }
+      // Parse the query
+      const query = rawRequest['rawRequest']['query'];
+      const parsedQuery = parse(query, { noLocation: true }).definitions;
+      const stringifiedParsedQuery = JSON.stringify(parsedQuery);
+      // Check if the query is in the allowlist
+      if (hashSetAllowlist.has(stringifiedParsedQuery)) {
+        span.setStatus({ code: SpanStatusCode.OK, message: String("Query allowed!") })
+        span.setAttribute('internal.visibility', String("user"))
+        span.end()
+        return new Response(null, { status: 204 });
+      }
+      else {
+        let response = new Blob([JSON.stringify({"message": "Query not allowed"})]);
+        return new Response(response, { status: 400 });
+      }
+    })
   },
 };
+
+const resolveConfig: ResolveConfigFn = (env, _trigger) => {
+  let pat :string = env.OTEL_EXPORTER_PAT;
+  return {
+    exporter: {
+      url: env.OTEL_EXPORTER_OTLP_ENDPOINT,
+      headers: {
+        'Authorization': `pat ${pat}`
+      },
+    },
+        service: { name: 'allow-list-plugin' },
+    }
+}
+
+export default instrument(handler, resolveConfig)
